@@ -39,5 +39,13 @@ int main() {
     assert(parsed_array.tool_calls.size() == 1);
     assert(parsed_array.tool_calls[0].arguments == R"({"file_path":"bar.txt"})");
 
+    common_chat_msg parsed_unterminated = agent_parse_tool_protocol_response(
+        R"(<tool_calls>[{"name":"read","arguments":{"file_path":"a.txt"}},{"name":"read","arguments":{"file_path":"b.txt"}}])",
+        "",
+        tools);
+    assert(parsed_unterminated.content.empty());
+    assert(parsed_unterminated.tool_calls.size() == 2);
+    assert(parsed_unterminated.tool_calls[1].arguments == R"({"file_path":"b.txt"})");
+
     return 0;
 }

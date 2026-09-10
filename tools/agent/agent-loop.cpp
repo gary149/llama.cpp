@@ -371,7 +371,7 @@ agent_loop_result agent_loop::run_streaming(
     while (config_.max_iterations <= 0 || result.iterations < config_.max_iterations) {
         if (should_stop()) {
             result.stop_reason = agent_stop_reason::USER_CANCELLED;
-            on_event(agent_event::completed(result.stop_reason, stats_));
+            on_event(agent_event::completed(result.stop_reason, stats_, last_prompt_tokens_));
             return result;
         }
 
@@ -386,6 +386,13 @@ agent_loop_result agent_loop::run_streaming(
 
         accumulate_stats(completion);
 
+        // If the backend flagged cancellation, stop immediately (ESC during generation)
+        if (completion.cancelled || should_stop()) {
+            result.stop_reason = agent_stop_reason::USER_CANCELLED;
+            on_event(agent_event::completed(result.stop_reason, stats_, last_prompt_tokens_));
+            return result;
+        }
+
         // Overflow recovery: compact and retry this iteration
         if (parsed.content.empty() && parsed.tool_calls.empty() && last_completion_overflowed_) {
             last_completion_overflowed_ = false;
@@ -396,13 +403,7 @@ agent_loop_result agent_loop::run_streaming(
             }
             on_event(agent_event::error("Context overflow: compaction could not free enough space"));
             result.stop_reason = agent_stop_reason::AGENT_ERROR;
-            on_event(agent_event::completed(result.stop_reason, stats_));
-            return result;
-        }
-
-        if (parsed.content.empty() && parsed.tool_calls.empty() && should_stop()) {
-            result.stop_reason = agent_stop_reason::USER_CANCELLED;
-            on_event(agent_event::completed(result.stop_reason, stats_));
+            on_event(agent_event::completed(result.stop_reason, stats_, last_prompt_tokens_));
             return result;
         }
 
@@ -417,7 +418,7 @@ agent_loop_result agent_loop::run_streaming(
         if (parsed.content.empty() && parsed.tool_calls.empty()) {
             result.stop_reason = agent_stop_reason::COMPLETED;
             result.final_response = "";
-            on_event(agent_event::completed(result.stop_reason, stats_));
+            on_event(agent_event::completed(result.stop_reason, stats_, last_prompt_tokens_));
             return result;
         }
 
@@ -430,7 +431,7 @@ agent_loop_result agent_loop::run_streaming(
         if (parsed.tool_calls.empty()) {
             result.stop_reason = agent_stop_reason::COMPLETED;
             result.final_response = parsed.content;
-            on_event(agent_event::completed(result.stop_reason, stats_));
+            on_event(agent_event::completed(result.stop_reason, stats_, last_prompt_tokens_));
             return result;
         }
 
@@ -438,7 +439,7 @@ agent_loop_result agent_loop::run_streaming(
         for (const auto & call : parsed.tool_calls) {
             if (should_stop()) {
                 result.stop_reason = agent_stop_reason::USER_CANCELLED;
-                on_event(agent_event::completed(result.stop_reason, stats_));
+                on_event(agent_event::completed(result.stop_reason, stats_, last_prompt_tokens_));
                 return result;
             }
 
@@ -450,7 +451,7 @@ agent_loop_result agent_loop::run_streaming(
             if (!async_perms) {
                 result.stop_reason = agent_stop_reason::AGENT_ERROR;
                 on_event(agent_event::error("Missing async permission manager"));
-                on_event(agent_event::completed(result.stop_reason, stats_));
+                on_event(agent_event::completed(result.stop_reason, stats_, last_prompt_tokens_));
                 return result;
             }
 
@@ -460,7 +461,8 @@ agent_loop_result agent_loop::run_streaming(
             auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
 
             // Emit tool result event
-            on_event(agent_event::tool_result(call.name, tool_res.success, tool_res.output, elapsed_ms));
+            on_event(agent_event::tool_result(call.name, tool_res.success, tool_res.output, elapsed_ms,
+                                              tool_res.error, tool_res.no_truncate_display));
 
             std::string call_id = call.id.empty() ? ("call_" + std::to_string(result.iterations)) : call.id;
             add_tool_result_message(call.name, call_id, tool_res);
@@ -469,6 +471,6 @@ agent_loop_result agent_loop::run_streaming(
 
     result.stop_reason = agent_stop_reason::MAX_ITERATIONS;
     result.final_response = "Reached maximum iterations (" + std::to_string(config_.max_iterations) + ")";
-    on_event(agent_event::completed(result.stop_reason, stats_));
+    on_event(agent_event::completed(result.stop_reason, stats_, last_prompt_tokens_));
     return result;
 }

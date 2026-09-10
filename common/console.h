@@ -5,7 +5,9 @@
 #include "common.h"
 
 #include <functional>
+#include <cstdio>
 #include <string>
+#include <string_view>
 #include <vector>
 
 enum display_type {
@@ -23,15 +25,22 @@ namespace console {
     void cleanup();
     void set_display(display_type display);
     bool readline(std::string & line, bool multiline_input);
+    FILE * output_file();
+
+    // TUI mode owns terminal output outside the legacy console logging path.
+    void set_tui_active(bool active);
+    bool is_tui_active();
 
     using completion_callback = std::function<std::vector<std::pair<std::string, size_t>>(std::string_view, size_t)>;
     void set_completion_callback(completion_callback cb);
+    std::vector<std::pair<std::string, size_t>> complete(std::string_view line, size_t cursor_byte_pos);
 
     // Clipboard image paste support (Ctrl+V).
     // The callback should attempt to read an image from the OS clipboard.
     // On success, write bytes and mime type to the output params and return true.
     using paste_image_callback = std::function<bool(std::vector<uint8_t> & bytes, std::string & mime)>;
     void set_paste_image_callback(paste_image_callback cb);
+    bool try_paste_image_marker(std::string & marker);
 
     // Returns and clears images accumulated during the last readline call.
     // Each pair is (bytes, mime_type).

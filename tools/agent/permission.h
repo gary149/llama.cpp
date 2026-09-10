@@ -23,7 +23,7 @@ enum class permission_type {
 };
 
 struct permission_request {
-    permission_type type;
+    permission_type type = permission_type::BASH;
     std::string tool_name;
     std::string description;
     std::string details;  // command, file path, etc.

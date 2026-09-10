@@ -14,6 +14,7 @@
 #include "http.h"
 #endif
 #include "terminal-image.h"
+#include "tui-renderer.h"
 #include "tool-registry.h"
 #include "permission.h"
 #include "log.h"
@@ -29,6 +30,8 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <sstream>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <signal.h>
@@ -40,6 +43,7 @@
 #   define NOMINMAX
 #endif
 #include <windows.h>
+#undef ERROR
 #include <io.h>
 #else
 #include <unistd.h>
@@ -313,7 +317,8 @@ struct user_command_result {
 
 static user_command_result run_user_command(const std::string & command,
                                             const std::string & working_dir,
-                                            std::atomic<bool> & is_interrupted) {
+                                            std::atomic<bool> & is_interrupted,
+                                            std::function<void(std::string_view)> on_output = nullptr) {
     user_command_result result;
     result.exit_code = 0;
 
@@ -372,8 +377,12 @@ static user_command_result run_user_command(const std::string & command,
 
         if (ReadFile(hReadPipe, buffer, sizeof(buffer) - 1, &bytesRead, NULL) && bytesRead > 0) {
             buffer[bytesRead] = '\0';
-            fwrite(buffer, 1, bytesRead, stdout);
-            fflush(stdout);
+            if (on_output) {
+                on_output(std::string_view(buffer, bytesRead));
+            } else {
+                fwrite(buffer, 1, bytesRead, stdout);
+                fflush(stdout);
+            }
             result.output.append(buffer, bytesRead);
             if (result.output.size() > MAX_CONTEXT_LENGTH * 2) {
                 result.output.erase(0, result.output.size() - MAX_CONTEXT_LENGTH);
@@ -440,8 +449,12 @@ static user_command_result run_user_command(const std::string & command,
         ssize_t n = read(pipe_fd[0], buffer, sizeof(buffer) - 1);
         if (n > 0) {
             buffer[n] = '\0';
-            fwrite(buffer, 1, n, stdout);
-            fflush(stdout);
+            if (on_output) {
+                on_output(std::string_view(buffer, n));
+            } else {
+                fwrite(buffer, 1, n, stdout);
+                fflush(stdout);
+            }
             result.output.append(buffer, n);
             if (result.output.size() > MAX_CONTEXT_LENGTH * 2) {
                 result.output.erase(0, result.output.size() - MAX_CONTEXT_LENGTH);
@@ -457,8 +470,12 @@ static user_command_result run_user_command(const std::string & command,
                 // Process ended, read remaining data
                 while ((n = read(pipe_fd[0], buffer, sizeof(buffer) - 1)) > 0) {
                     buffer[n] = '\0';
-                    fwrite(buffer, 1, n, stdout);
-                    fflush(stdout);
+                    if (on_output) {
+                        on_output(std::string_view(buffer, n));
+                    } else {
+                        fwrite(buffer, 1, n, stdout);
+                        fflush(stdout);
+                    }
                     result.output.append(buffer, n);
                     if (result.output.size() > MAX_CONTEXT_LENGTH * 2) {
                         result.output.erase(0, result.output.size() - MAX_CONTEXT_LENGTH);
@@ -509,6 +526,7 @@ const char * LLAMA_AGENT_LOGO = R"(
 )";
 
 static std::atomic<bool> g_is_interrupted = false;
+static std::atomic<bool> g_terminate_requested = false;
 
 // Points at main()'s automatic-storage spawned_llama_server (if any) so the
 // double-Ctrl-C path can reap the child before std::exit() skips destructors.
@@ -539,7 +557,7 @@ static std::string read_stdin_prompt() {
 }
 
 #if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__)) || defined (_WIN32)
-static void signal_handler(int) {
+static void signal_handler(int sig) {
     if (g_is_interrupted.load()) {
         // std::exit() skips automatic-storage destructors, so reap the spawned
         // llama-server here. kill()/waitpid() in stop() are async-signal-safe.
@@ -551,6 +569,9 @@ static void signal_handler(int) {
         std::exit(130);
     }
     g_is_interrupted.store(true);
+    if (sig == SIGTERM) {
+        g_terminate_requested.store(true);
+    }
 }
 #endif
 
@@ -704,6 +725,9 @@ int main(int argc, char ** argv) {
         }
     }
 
+    if (backend_mode != "local") {
+        params.server_base = server_url;
+    }
     if (!common_params_parse(argc, argv, params, LLAMA_EXAMPLE_CLI)) {
         return 1;
     }
@@ -723,6 +747,10 @@ int main(int argc, char ** argv) {
     // (CUDA/Metal/...), and the auto-spawn path fork()s after this point — fork() after
     // GPU-runtime init is unsupported. Initializing here would also be wasted work when
     // the HTTP/auto-spawn backend is used (the spawned llama-server does its own init).
+
+    if (!is_stdin_terminal()) {
+        params.simple_io = true;
+    }
 
     console::init(params.simple_io, params.use_color);
     atexit([]() { console::cleanup(); });
@@ -789,8 +817,6 @@ int main(int argc, char ** argv) {
         http_cfg.base_url = server_url;
         if (!params.model_alias.empty()) {
             http_cfg.model = *params.model_alias.begin();
-        } else if (!params.model.name.empty()) {
-            http_cfg.model = params.model.name;
         }
         http_backend = std::make_unique<http_inference_backend>(std::move(http_cfg));
         inference = http_backend.get();
@@ -975,37 +1001,6 @@ int main(int argc, char ** argv) {
         return "";
     };
 
-    if (resume_ptr && !resume_ptr->messages.empty()) {
-        for (const auto & m : resume_ptr->messages) {
-            std::string role = m.value("role", "");
-            if (role == "user") {
-                console::set_display(DISPLAY_TYPE_USER_INPUT);
-                console::log("› %s\n", extract_text(m).c_str());
-                console::set_display(DISPLAY_TYPE_RESET);
-            } else if (role == "assistant") {
-                std::string content = extract_text(m);
-                if (!content.empty()) {
-                    console::log("%s\n", content.c_str());
-                }
-                if (m.contains("tool_calls") && m["tool_calls"].is_array()) {
-                    for (const auto & tc : m["tool_calls"]) {
-                        if (tc.contains("function")) {
-                            std::string name = tc["function"].value("name", "");
-                            console::log("› %s\n", name.c_str());
-                        }
-                    }
-                }
-            } else if (role == "tool") {
-                std::string output = extract_text(m);
-                if (output.length() > 500) {
-                    output = output.substr(0, 500) + "\n... (truncated)";
-                }
-                console::log("%s\n", output.c_str());
-            }
-        }
-        console::log("--- session resumed ---\n");
-    }
-
     // Resolve initial prompt from -p/--prompt flag or stdin
     std::string initial_prompt;
     if (!params.prompt.empty()) {
@@ -1039,6 +1034,101 @@ int main(int argc, char ** argv) {
         console::log("\n");
     }
 
+    const bool use_tui = is_stdin_terminal() && !params.simple_io && !params.single_turn;
+    permission_manager_async tui_permissions;
+    std::unique_ptr<tui_renderer> tui;
+
+    auto stats_text = [](const session_stats & stats) {
+        std::ostringstream ss;
+        ss << "\nSession Statistics:\n";
+        ss << "  Prompt tokens:  " << stats.total_input << "\n";
+        ss << "  Output tokens:  " << stats.total_output << "\n";
+        if (stats.total_cached > 0) {
+            ss << "  Cached tokens:  " << stats.total_cached << "\n";
+        }
+        ss << "  Total tokens:   " << (stats.total_input + stats.total_output) << "\n";
+        if (stats.total_prompt_ms > 0) {
+            ss.setf(std::ios::fixed);
+            ss.precision(2);
+            ss << "  Prompt time:    " << (stats.total_prompt_ms / 1000.0) << "s\n";
+        }
+        if (stats.total_predicted_ms > 0) {
+            ss.setf(std::ios::fixed);
+            ss.precision(2);
+            ss << "  Gen time:       " << (stats.total_predicted_ms / 1000.0) << "s\n";
+            ss.precision(1);
+            double avg_speed = stats.total_output * 1000.0 / stats.total_predicted_ms;
+            ss << "  Avg speed:      " << avg_speed << " tok/s\n";
+        }
+        return ss.str();
+    };
+
+    if (use_tui) {
+        tui_permissions.set_project_root(working_dir);
+        tui_permissions.set_yolo_mode(yolo_mode);
+
+        tui_renderer::config tui_cfg;
+        tui_cfg.out = console::output_file();
+        tui_cfg.color = params.use_color;
+        tui_cfg.multiline_input = params.multiline_input;
+        tui_cfg.working_dir = working_dir;
+        tui_cfg.session_path = session_path;
+        tui_cfg.meta = inf;
+        tui_cfg.permissions = &tui_permissions;
+        tui_cfg.interrupt = []() { g_is_interrupted.store(true); };
+        tui = std::make_unique<tui_renderer>(std::move(tui_cfg));
+    }
+
+    auto emit_tui_or_console = [&](const std::string & text,
+                                   tui_transcript_style style = tui_transcript_style::NORMAL) {
+        if (tui) {
+            tui->post_transcript(text, style);
+        } else {
+            switch (style) {
+                case tui_transcript_style::FAILURE:
+                    console::error("%s", text.c_str());
+                    break;
+                case tui_transcript_style::INFO:
+                    console::set_display(DISPLAY_TYPE_INFO);
+                    console::log("%s", text.c_str());
+                    console::set_display(DISPLAY_TYPE_RESET);
+                    break;
+                default:
+                    console::log("%s", text.c_str());
+                    break;
+            }
+        }
+    };
+
+    if (resume_ptr && !resume_ptr->messages.empty()) {
+        for (const auto & m : resume_ptr->messages) {
+            std::string role = m.value("role", "");
+            if (role == "user") {
+                emit_tui_or_console("\xE2\x80\xBA " + extract_text(m) + "\n", tui_transcript_style::USER_INPUT);
+            } else if (role == "assistant") {
+                std::string content = extract_text(m);
+                if (!content.empty()) {
+                    emit_tui_or_console(content + "\n");
+                }
+                if (m.contains("tool_calls") && m["tool_calls"].is_array()) {
+                    for (const auto & tc : m["tool_calls"]) {
+                        if (tc.contains("function")) {
+                            std::string name = tc["function"].value("name", "");
+                            emit_tui_or_console("> " + name + "\n", tui_transcript_style::INFO);
+                        }
+                    }
+                }
+            } else if (role == "tool") {
+                std::string output = extract_text(m);
+                if (output.length() > 500) {
+                    output = output.substr(0, 500) + "\n... (truncated)";
+                }
+                emit_tui_or_console(output + "\n");
+            }
+        }
+        emit_tui_or_console("--- session resumed ---\n");
+    }
+
     // Track if we have an initial prompt to process
     bool first_turn = !initial_prompt.empty();
 
@@ -1051,33 +1141,59 @@ int main(int argc, char ** argv) {
             // Use the initial prompt
             buffer = initial_prompt;
             first_turn = false;
-            console::set_display(DISPLAY_TYPE_USER_INPUT);
-            console::log("\n› %s\n", buffer.c_str());
-            console::set_display(DISPLAY_TYPE_RESET);
+            if (tui) {
+                tui->post_transcript("\n> " + buffer + "\n", tui_transcript_style::USER_INPUT);
+            } else {
+                console::set_display(DISPLAY_TYPE_USER_INPUT);
+                console::log("\n\xE2\x80\xBA %s\n", buffer.c_str());
+                console::set_display(DISPLAY_TYPE_RESET);
+            }
         } else {
-            // Interactive input
-            console::set_display(DISPLAY_TYPE_USER_INPUT);
-            console::log("\n› ");
+            if (tui) {
+                tui_command command;
+                bool received = false;
+                while (!received && !g_terminate_requested.load()) {
+                    received = tui->wait_for_command(command, 200);
+                }
+                if (!received || command.eof) {
+                    break;
+                }
+                buffer = std::move(command.text);
+                pasted_images = std::move(command.images);
+                // The input region clears on submit, so echo the submission into the transcript
+                if (!buffer.empty()) {
+                    tui->post_transcript("\n\xE2\x80\xBA " + buffer + "\n",
+                                         tui_transcript_style::USER_INPUT);
+                }
+            } else {
+                // Interactive input
+                console::set_display(DISPLAY_TYPE_USER_INPUT);
+                console::log("\n\xE2\x80\xBA ");
 
-            std::string line;
-            bool another_line = true;
-            do {
-                another_line = console::readline(line, params.multiline_input);
-                buffer += line;
-            } while (another_line);
+                std::string line;
+                bool another_line = true;
+                do {
+                    another_line = console::readline(line, params.multiline_input);
+                    buffer += line;
+                } while (another_line);
 
-            console::set_display(DISPLAY_TYPE_RESET);
+                console::set_display(DISPLAY_TYPE_RESET);
 
-            // Collect clipboard images pasted during readline (via Ctrl+V)
-            pasted_images = console::take_pending_images();
+                // Collect clipboard images pasted during readline (via Ctrl+V)
+                pasted_images = console::take_pending_images();
 
-            if (should_stop()) {
-                g_is_interrupted.store(false);
-                break;
+                if (should_stop()) {
+                    g_is_interrupted.store(false);
+                    break;
+                }
+
+                // Remove trailing newline
+                if (!buffer.empty() && buffer.back() == '\n') {
+                    buffer.pop_back();
+                }
             }
 
-            // Remove trailing newline
-            if (!buffer.empty() && buffer.back() == '\n') {
+            if (!tui && !buffer.empty() && buffer.back() == '\n') {
                 buffer.pop_back();
             }
 
@@ -1095,30 +1211,70 @@ int main(int argc, char ** argv) {
                 // Trim leading whitespace
                 size_t first = cmd.find_first_not_of(" \t");
                 if (first == std::string::npos) {
-                    console::log("Usage: !<command> or !!<command>\n");
+                    emit_tui_or_console("Usage: !<command> or !!<command>\n");
                     continue;
                 }
                 cmd = cmd.substr(first);
 
-                console::set_display(DISPLAY_TYPE_PROMPT);
-                console::log("\n$ %s\n", cmd.c_str());
-                console::set_display(DISPLAY_TYPE_RESET);
+                if (tui) {
+                    // "!!" commands are hidden from the model - show a distinct prefix
+                    if (exclude_from_context) {
+                        tui->post_transcript("\n$ " + cmd + "  (hidden from model)\n",
+                                             tui_transcript_style::INFO);
+                    } else {
+                        tui->post_transcript("\n$ " + cmd + "\n", tui_transcript_style::INFO);
+                    }
+                } else {
+                    console::set_display(DISPLAY_TYPE_PROMPT);
+                    if (exclude_from_context) {
+                        console::log("\n$ %s  (hidden from model)\n", cmd.c_str());
+                    } else {
+                        console::log("\n$ %s\n", cmd.c_str());
+                    }
+                    console::set_display(DISPLAY_TYPE_RESET);
+                }
                 g_is_interrupted.store(false);
-                auto cmd_result = run_user_command(cmd, working_dir, g_is_interrupted);
+                std::string shell_pending;
+                std::function<void(std::string_view)> on_output;
+                if (tui) {
+                    // Post whole lines only: a pipe read can split a line, a UTF-8 sequence, or an escape code
+                    on_output = [&](std::string_view chunk) {
+                        shell_pending.append(chunk.data(), chunk.size());
+                        size_t last_nl = shell_pending.rfind('\n');
+                        if (last_nl != std::string::npos) {
+                            tui->post_transcript(shell_pending.substr(0, last_nl + 1));
+                            shell_pending.erase(0, last_nl + 1);
+                        }
+                    };
+                    // The generating state routes ESC/Ctrl+C to the interrupt flag that stops the command
+                    tui->set_generating(true);
+                }
+                auto cmd_result = run_user_command(cmd, working_dir, g_is_interrupted, on_output);
+                if (tui) {
+                    tui->set_generating(false);
+                    if (!shell_pending.empty()) {
+                        tui->post_transcript(shell_pending + "\n");
+                    }
+                }
 
                 // Ensure output ends with newline for clean display
-                if (!cmd_result.output.empty() && cmd_result.output.back() != '\n') {
+                if (!tui && !cmd_result.output.empty() && cmd_result.output.back() != '\n') {
                     fwrite("\n", 1, 1, stdout);
                 }
 
                 if (cmd_result.exit_code != 0) {
-                    console::set_display(DISPLAY_TYPE_ERROR);
-                    console::log("[exit code: %d]\n", cmd_result.exit_code);
-                    console::set_display(DISPLAY_TYPE_RESET);
+                    if (tui) {
+                        tui->post_transcript("[exit code: " + std::to_string(cmd_result.exit_code) + "]\n",
+                                             tui_transcript_style::FAILURE);
+                    } else {
+                        console::set_display(DISPLAY_TYPE_ERROR);
+                        console::log("[exit code: %d]\n", cmd_result.exit_code);
+                        console::set_display(DISPLAY_TYPE_RESET);
+                    }
                 }
 
                 if (g_is_interrupted.load()) {
-                    console::log("[interrupted]\n");
+                    emit_tui_or_console("[interrupted]\n");
                     g_is_interrupted.store(false);
                 }
 
@@ -1135,97 +1291,119 @@ int main(int argc, char ** argv) {
             }
 
             // Process commands
-            if (buffer == "/exit" || buffer == "/quit") {
+            std::string command_buffer = buffer;
+            while (!command_buffer.empty() &&
+                   (command_buffer.back() == ' ' || command_buffer.back() == '\t')) {
+                command_buffer.pop_back();
+            }
+            if (command_buffer == "/exit" || command_buffer == "/quit") {
                 break;
             }
-            if (buffer == "/clear") {
+            if (command_buffer == "/clear") {
                 agent.clear();
-                console::log("Conversation cleared.\n");
+                if (tui) {
+                    tui_permissions.clear_session();
+                    tui->post_stats(agent.get_stats(), 0);
+                    // Separate the old transcript from the cleared context
+                    tui->post_transcript(
+                        "\n--- conversation cleared ---\n\n",
+                        tui_transcript_style::INFO);
+                }
+                emit_tui_or_console("Conversation cleared.\n", tui_transcript_style::INFO);
                 continue;
             }
-            if (buffer == "/compact") {
-                console::log("\nCompacting...\n");
-                if (agent.compact()) {
-                    console::log("Context compacted.\n");
+            if (command_buffer == "/compact") {
+                emit_tui_or_console("\nCompacting...\n", tui_transcript_style::INFO);
+                g_is_interrupted.store(false);
+                if (tui) {
+                    tui->set_generating(true);
+                }
+                bool compacted = agent.compact();
+                if (tui) {
+                    tui->set_generating(false);
+                }
+                if (g_is_interrupted.load()) {
+                    emit_tui_or_console("[Compaction cancelled]\n");
+                    g_is_interrupted.store(false);
+                } else if (compacted) {
+                    emit_tui_or_console("Context compacted.\n", tui_transcript_style::INFO);
                 } else {
-                    console::log("Nothing to compact (conversation too short).\n");
+                    emit_tui_or_console("Nothing to compact (conversation too short).\n");
                 }
                 continue;
             }
-            if (buffer == "/tools") {
-                console::log("\nAvailable tools:\n");
+            if (command_buffer == "/tools") {
+                std::ostringstream ss;
+                ss << "\nAvailable tools:\n";
                 for (const auto * tool : tool_registry::instance().get_all_tools()) {
-                    console::log("  %s:\n", tool->name.c_str());
-                    console::log("    %s\n", tool->description.c_str());
+                    ss << "  " << tool->name << ":\n";
+                    ss << "    " << tool->description << "\n";
                 }
+                emit_tui_or_console(ss.str());
                 continue;
             }
-            if (buffer == "/stats") {
+            if (command_buffer == "/stats") {
                 const auto & stats = agent.get_stats();
-                console::log("\nSession Statistics:\n");
-                console::log("  Prompt tokens:  %d\n", stats.total_input);
-                console::log("  Output tokens:  %d\n", stats.total_output);
-                if (stats.total_cached > 0) {
-                    console::log("  Cached tokens:  %d\n", stats.total_cached);
-                }
-                console::log("  Total tokens:   %d\n", stats.total_input + stats.total_output);
-
-                if (stats.total_prompt_ms > 0) {
-                    console::log("  Prompt time:    %.2fs\n", stats.total_prompt_ms / 1000.0);
-                }
-                if (stats.total_predicted_ms > 0) {
-                    console::log("  Gen time:       %.2fs\n", stats.total_predicted_ms / 1000.0);
-                    double avg_speed = stats.total_output * 1000.0 / stats.total_predicted_ms;
-                    console::log("  Avg speed:      %.1f tok/s\n", avg_speed);
-                }
+                emit_tui_or_console(stats_text(stats));
                 continue;
             }
-            if (buffer == "/skills") {
+            if (command_buffer == "/skills") {
                 const auto & skills = resources.skills.get_skills();
+                std::ostringstream ss;
                 if (skills.empty()) {
-                    console::log("\nNo skills discovered.\n");
-                    console::log("Skills are loaded from:\n");
-                    console::log("  ./.llama-agent/skills/  (project-local)\n");
-                    console::log("  ~/.llama-agent/skills/  (user-global)\n");
+                    ss << "\nNo skills discovered.\n";
+                    ss << "Skills are loaded from:\n";
+                    ss << "  ./.llama-agent/skills/  (project-local)\n";
+                    ss << "  ~/.llama-agent/skills/  (user-global)\n";
                 } else {
-                    console::log("\nAvailable skills:\n");
+                    ss << "\nAvailable skills:\n";
                     for (const auto & skill : skills) {
-                        console::log("  %s:\n", skill.name.c_str());
-                        console::log("    %s\n", skill.description.c_str());
-                        console::log("    Path: %s\n", skill.path.c_str());
+                        ss << "  " << skill.name << ":\n";
+                        ss << "    " << skill.description << "\n";
+                        ss << "    Path: " << skill.path << "\n";
                     }
                 }
+                emit_tui_or_console(ss.str());
                 continue;
             }
-            if (buffer == "/agents") {
+            if (command_buffer == "/agents") {
                 const auto & files = resources.agents_md.get_files();
+                std::ostringstream ss;
                 if (files.empty()) {
-                    console::log("\nNo AGENTS.md files discovered.\n");
-                    console::log("AGENTS.md files are searched from:\n");
-                    console::log("  ./AGENTS.md to git root  (project-specific)\n");
-                    console::log("  ~/.llama-agent/AGENTS.md  (global)\n");
+                    ss << "\nNo AGENTS.md files discovered.\n";
+                    ss << "AGENTS.md files are searched from:\n";
+                    ss << "  ./AGENTS.md to git root  (project-specific)\n";
+                    ss << "  ~/.llama-agent/AGENTS.md  (global)\n";
                 } else {
-                    console::log("\nDiscovered AGENTS.md files (closest first):\n");
+                    ss << "\nDiscovered AGENTS.md files (closest first):\n";
                     for (const auto & file : files) {
-                        console::log("  %s", file.relative_path.c_str());
+                        ss << "  " << file.relative_path;
                         if (file.depth == 0) {
-                            console::log(" (highest precedence)");
+                            ss << " (highest precedence)";
                         }
-                        console::log("\n    %zu bytes\n", file.content.size());
+                        ss << "\n    " << file.content.size() << " bytes\n";
                     }
                 }
+                emit_tui_or_console(ss.str());
                 continue;
             }
         }
 
-        console::log("\n");
+        if (!tui) {
+            console::log("\n");
+        }
 
         // Build user content — multimodal if images were pasted, plain string otherwise
         json user_content;
         if (!pasted_images.empty() && (inf.has_vision || !inf.image_support_known)) {
-            // Show terminal preview of pasted images
-            for (const auto & [bytes, mime] : pasted_images) {
-                render_image_to_terminal(bytes.data(), bytes.size(), mime);
+            if (tui) {
+                tui->post_transcript("[attached " + std::to_string(pasted_images.size()) +
+                                     " image(s)]\n", tui_transcript_style::INFO);
+            } else {
+                // Show terminal preview of pasted images
+                for (const auto & [bytes, mime] : pasted_images) {
+                    render_image_to_terminal(bytes.data(), bytes.size(), mime);
+                }
             }
             // Strip [image] / [image N] markers that were inserted for display only
             std::string clean_text = buffer;
@@ -1254,43 +1432,79 @@ int main(int argc, char ** argv) {
             }
         } else {
             if (!pasted_images.empty()) {
-                console::set_display(DISPLAY_TYPE_ERROR);
-                console::log("[model lacks vision — %zu image(s) not included]\n",
-                             pasted_images.size());
-                console::set_display(DISPLAY_TYPE_RESET);
+                if (tui) {
+                    tui->post_transcript("[model lacks vision - " +
+                                         std::to_string(pasted_images.size()) +
+                                         " image(s) not included]\n",
+                                         tui_transcript_style::FAILURE);
+                } else {
+                    console::set_display(DISPLAY_TYPE_ERROR);
+                    console::log("[model lacks vision - %zu image(s) not included]\n",
+                                 pasted_images.size());
+                    console::set_display(DISPLAY_TYPE_RESET);
+                }
             }
             user_content = buffer;
         }
 
         // Run agent loop
-        agent_loop_result result = agent.run(user_content);
-
-        console::log("\n");
+        agent_loop_result result;
+        if (tui) {
+            g_is_interrupted.store(false);
+            tui->set_generating(true);
+            result = agent.run_streaming(
+                user_content,
+                [&](const agent_event & event) {
+                    tui->post_agent_event(event);
+                },
+                should_stop,
+                &tui_permissions);
+            tui->set_generating(false);
+        } else {
+            result = agent.run(user_content);
+            console::log("\n");
+        }
 
         // Display result
         switch (result.stop_reason) {
             case agent_stop_reason::COMPLETED:
-                console::set_display(DISPLAY_TYPE_INFO);
-                console::log("[Completed in %d iteration(s)]\n", result.iterations);
-                console::set_display(DISPLAY_TYPE_RESET);
+                if (tui) {
+                    tui->post_transcript("\n[Completed in " + std::to_string(result.iterations) +
+                                         " iteration(s)]\n", tui_transcript_style::INFO);
+                } else {
+                    console::set_display(DISPLAY_TYPE_INFO);
+                    console::log("\n[Completed in %d iteration(s)]\n", result.iterations);
+                    console::set_display(DISPLAY_TYPE_RESET);
+                }
                 break;
             case agent_stop_reason::MAX_ITERATIONS:
-                console::set_display(DISPLAY_TYPE_ERROR);
-                console::log("[Stopped: max iterations reached (%d)]\n", result.iterations);
-                console::set_display(DISPLAY_TYPE_RESET);
+                if (tui) {
+                    tui->post_transcript("[Stopped: max iterations reached (" +
+                                         std::to_string(result.iterations) + ")]\n",
+                                         tui_transcript_style::FAILURE);
+                } else {
+                    console::set_display(DISPLAY_TYPE_ERROR);
+                    console::log("[Stopped: max iterations reached (%d)]\n", result.iterations);
+                    console::set_display(DISPLAY_TYPE_RESET);
+                }
                 break;
             case agent_stop_reason::USER_CANCELLED:
-                console::log("[Cancelled by user]\n");
+                emit_tui_or_console("[Cancelled by user]\n");
                 g_is_interrupted.store(false);
                 break;
             case agent_stop_reason::AGENT_ERROR:
-                console::error("[Error occurred]\n");
+                emit_tui_or_console("[Error occurred]\n", tui_transcript_style::FAILURE);
                 break;
         }
 
         if (params.single_turn) {
             break;
         }
+    }
+
+    if (tui) {
+        tui->shutdown();
+        tui.reset();
     }
 
     console::set_display(DISPLAY_TYPE_RESET);

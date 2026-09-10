@@ -112,6 +112,10 @@ bool agent_loop::do_compact(int32_t effective_keep) {
             last_prompt_tokens_, to_summarize.size(), messages_.size() - cut_idx);
 
     std::string summary = generate_summary(to_summarize, previous_summary_);
+    if (is_interrupted_.load()) {
+        LOG_WRN("Compaction cancelled: partial summary discarded\n");
+        return false;
+    }
     if (summary.empty()) {
         LOG_WRN("Compaction failed: empty summary\n");
         return false;

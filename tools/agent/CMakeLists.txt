@@ -82,6 +82,9 @@ add_executable(${TARGET}
     agent-loop-tools-cli.cpp
     permission-prompt.cpp
     stb-image-impl.cpp
+    tui-editor.cpp
+    tui-renderer.cpp
+    tui-select-list.cpp
 )
 agent_force_link_core(${TARGET})
 target_compile_features(${TARGET} PRIVATE cxx_std_17)
@@ -190,6 +193,39 @@ if(LLAMA_BUILD_TESTS)
         target_compile_options(test-agent-inference-backend PRIVATE -Wno-cast-qual)  # vendored stb_image.h
     endif()
     add_test(NAME agent-inference-backend COMMAND test-agent-inference-backend)
+
+    add_executable(test-agent-tui
+        test-tui.cpp
+        tui-editor.cpp
+        tui-renderer.cpp
+        tui-select-list.cpp
+    )
+    target_link_libraries(test-agent-tui PRIVATE ${AGENT_CORE_TARGET})
+    target_compile_features(test-agent-tui PRIVATE cxx_std_17)
+    target_include_directories(test-agent-tui PRIVATE ../server)
+    add_test(NAME agent-tui COMMAND test-agent-tui)
+
+    option(LLAMA_AGENT_TERMINAL_TESTS "Run agent PTY rendering tests (requires Python and pyte)" OFF)
+    if(LLAMA_AGENT_TERMINAL_TESTS)
+        if(WIN32)
+            message(FATAL_ERROR "Agent PTY tests currently require a POSIX host")
+        endif()
+        find_package(Python3 REQUIRED COMPONENTS Interpreter)
+        execute_process(COMMAND ${Python3_EXECUTABLE} -c "import pyte" RESULT_VARIABLE PYTE_STATUS)
+        if(NOT PYTE_STATUS EQUAL 0)
+            message(FATAL_ERROR "Install tools/agent/tests/requirements.txt into the selected Python environment")
+        endif()
+        add_test(NAME agent-terminal COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_terminal.py
+            --executable $<TARGET_FILE:test-agent-tui>
+            --artifacts ${CMAKE_CURRENT_BINARY_DIR}/terminal-artifacts/plain)
+        add_test(NAME agent-terminal-color COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_terminal.py --color
+            --executable $<TARGET_FILE:test-agent-tui>
+            --artifacts ${CMAKE_CURRENT_BINARY_DIR}/terminal-artifacts/color)
+        set_tests_properties(agent-terminal PROPERTIES TIMEOUT 600)
+        set_tests_properties(agent-terminal-color PROPERTIES TIMEOUT 600)
+    endif()
 
     if(LLAMA_HTTPLIB)
         add_executable(test-agent-http-inference-backend

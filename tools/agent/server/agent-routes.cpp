@@ -253,6 +253,9 @@ agent_routes::agent_routes(agent_session_manager & session_mgr)
                 case agent_event_type::REASONING_DELTA:
                     event_type = "reasoning_delta";
                     break;
+                case agent_event_type::TOOL_CALL_DELTA:
+                    event_type = "tool_call_delta";
+                    break;
                 case agent_event_type::TOOL_START:
                     event_type = "tool_start";
                     break;
@@ -402,4 +405,3 @@ agent_routes::agent_routes(agent_session_manager & session_mgr)
         });
     };
 }
-
