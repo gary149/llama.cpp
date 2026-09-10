@@ -282,8 +282,11 @@ static int terminal_fixture(const char * control_path) {
 static void test_native_console() {
     FreeConsole(); // do not resize the parent terminal
     require(AllocConsole() != 0, "cannot allocate an isolated test console");
-    HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
-    HANDLE output = GetStdHandle(STD_OUTPUT_HANDLE);
+    // ctest redirects stdio to pipes, so open the new console directly and make it the standard handles the renderer uses
+    HANDLE input = CreateFileW(L"CONIN$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+    HANDLE output = CreateFileW(L"CONOUT$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+    require(input != INVALID_HANDLE_VALUE && output != INVALID_HANDLE_VALUE, "cannot open test console handles");
+    require(SetStdHandle(STD_INPUT_HANDLE, input) && SetStdHandle(STD_OUTPUT_HANDLE, output), "cannot install test console handles");
     FILE * terminal = std::fopen("CONOUT$", "w");
     require(terminal != nullptr, "cannot open test console output");
     DWORD input_mode = 0;
