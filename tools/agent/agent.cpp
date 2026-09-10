@@ -18,7 +18,14 @@
 #include "tool-registry.h"
 #include "permission.h"
 #include "log.h"
+#include "chat.h"
+#include "json.h"
+
+// The server headers alias `json` to common_json and the agent headers alias it to nlohmann::ordered_json.
+// Rename the token only while the server headers are parsed so both can share this translation unit.
+#define json common_json
 #include "server-context.h"
+#undef json
 
 #ifndef _WIN32
 #include "mcp/mcp-server-manager.h"

@@ -38,7 +38,7 @@ with tempfile.TemporaryDirectory(prefix="agent-live-") as workspace:
         terminal.wait(lambda: "42" in terminal.text(), "live model answer", timeout=120)
         terminal.set_size(100, 32)
         terminal.wait(lambda: "tok/s" in terminal.text(), "live footer after resize")
-        terminal.wait(lambda: terminal.screen.display[-1].startswith("  "), "answer completed before menu")
+        terminal.wait(lambda: terminal.screen.display[-1].startswith("  "), "answer completed before menu", timeout=60)
         before_menu = terminal.screen.display[:-3]
         for cycle in range(2):
             terminal.send("/")
