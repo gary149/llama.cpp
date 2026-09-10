@@ -1,28 +1,38 @@
 #include "local-inference-backend.h"
 
 #include "common.h"
+#include "chat.h"
+#include "json.h"
 #include "log.h"
+
+// The server headers alias `json` to common_json and the agent headers alias it to nlohmann::ordered_json.
+// Rename the token only while the server headers are parsed so both can share this translation unit.
+#define json common_json
 #include "server-common.h"
 #include "server-context.h"
 #include "server-schema.h"
 #include "server-task.h"
+#undef json
 
 #include <algorithm>
 #include <stdexcept>
 
-static inference_timings to_inference_timings(const result_timings & timings) {
+static inference_timings to_inference_timings(const server_slot_stats & stats) {
     inference_timings out;
-    out.cache_n = timings.cache_n;
-    out.prompt_n = timings.prompt_n;
-    out.prompt_ms = timings.prompt_ms;
-    out.prompt_per_token_ms = timings.prompt_per_token_ms;
-    out.prompt_per_second = timings.prompt_per_second;
-    out.predicted_n = timings.predicted_n;
-    out.predicted_ms = timings.predicted_ms;
-    out.predicted_per_token_ms = timings.predicted_per_token_ms;
-    out.predicted_per_second = timings.predicted_per_second;
-    out.draft_n = timings.draft_n;
-    out.draft_n_accepted = timings.draft_n_accepted;
+    if (!stats.is_set()) {
+        return out;
+    }
+    out.cache_n = (int32_t) stats.n_prompt_cached;
+    out.prompt_n = (int32_t) stats.n_prompt_processed;
+    out.prompt_ms = stats.t_prompt_ms();
+    out.prompt_per_token_ms = stats.t_prompt_per_token_ms();
+    out.prompt_per_second = stats.n_prompt_tps();
+    out.predicted_n = (int32_t) stats.n_gen;
+    out.predicted_ms = stats.t_gen_ms();
+    out.predicted_per_token_ms = stats.t_gen_per_token_ms();
+    out.predicted_per_second = stats.n_gen_tps();
+    out.draft_n = (int32_t) stats.n_draft_tokens;
+    out.draft_n_accepted = (int32_t) stats.n_draft_accepted;
     return out;
 }
 
@@ -94,8 +104,8 @@ inference_result local_inference_backend::complete(
 
         auto server_meta = server_ctx_.get_meta();
 
-        json body;
-        body["messages"] = request.messages;
+        common_json body = common_json::object();
+        body["messages"] = common_json::parse(request.messages.dump());
         if (!request.tools.empty()) {
             body["tools"] = common_chat_tools_to_json_oaicompat(request.tools);
         }
@@ -103,7 +113,7 @@ inference_result local_inference_backend::complete(
         body["timings_per_token"] = request.timings_per_token;
         body["cache_prompt"] = request.cache_prompt;
         body["return_progress"] = request.return_progress;
-        body["stream_options"] = {{"include_usage", true}};
+        body["stream_options"] = common_json::object({{"include_usage", true}});
         if (request.n_predict >= 0) {
             body["n_predict"] = request.n_predict;
         }
@@ -115,7 +125,7 @@ inference_result local_inference_backend::complete(
         }
 
         std::vector<raw_buffer> files;
-        json data = oaicompat_chat_params_parse(body, server_meta.chat_params, files);
+        common_json data = oaicompat_chat_params_parse(body, server_meta.chat_params, files);
 
         server_task task = server_task(SERVER_TASK_TYPE_COMPLETION);
         task.id = rd.get_new_id();
@@ -167,7 +177,7 @@ inference_result local_inference_backend::complete(
             if (err) {
                 out.error = err->err_msg;
             } else {
-                json err_data = result->to_json();
+                common_json err_data = result->to_json();
                 out.error = err_data.value("message", "Unknown inference error");
             }
             emit({inference_event_type::ERROR, {}, {}, out.error, {}});
@@ -175,7 +185,7 @@ inference_result local_inference_backend::complete(
         }
 
         if (auto * partial = dynamic_cast<server_task_result_cmpl_partial *>(result.get())) {
-            out.timings = to_inference_timings(partial->timings);
+            out.timings = to_inference_timings(partial->stats);
             out.prompt_tokens = partial->n_prompt_tokens;
             out.cached_prompt_tokens = std::max(out.cached_prompt_tokens, partial->n_prompt_tokens_cache);
 
@@ -183,7 +193,7 @@ inference_result local_inference_backend::complete(
                 inference_event event;
                 event.type = inference_event_type::PROMPT_PROGRESS;
                 event.progress = to_inference_progress(partial->progress);
-                event.data = partial->progress.to_json();
+                event.data = json::parse(partial->progress.to_json().dump());
                 emit(event);
                 out.cached_prompt_tokens = std::max(out.cached_prompt_tokens, partial->progress.cache);
             }
@@ -213,7 +223,7 @@ inference_result local_inference_backend::complete(
         }
 
         if (auto * final_result = dynamic_cast<server_task_result_cmpl_final *>(result.get())) {
-            out.timings = to_inference_timings(final_result->timings);
+            out.timings = to_inference_timings(final_result->stats);
             out.prompt_tokens = final_result->n_prompt_tokens;
             out.cached_prompt_tokens = std::max(out.cached_prompt_tokens, final_result->n_prompt_tokens_cache);
             out.cached_prompt_tokens = std::max(out.cached_prompt_tokens, final_result->n_tokens_cached);

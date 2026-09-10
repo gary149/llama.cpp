@@ -323,7 +323,7 @@ static void hoist_defs_to_root(json & schema) {
 
         // If this node has $defs, collect them
         if (node.contains("$defs") && node["$defs"].is_object()) {
-            for (auto & [key, value] : node["$defs"].items()) {
+            for (const auto & [key, value] : node["$defs"].items()) {
                 if (!collected_defs.contains(key)) {
                     collected_defs[key] = value;
                 }
@@ -333,7 +333,7 @@ static void hoist_defs_to_root(json & schema) {
         }
 
         // Recurse into object values
-        for (auto & [key, value] : node.items()) {
+        for (const auto & [key, value] : node.items()) {
             if (value.is_object()) {
                 collect(value);
             } else if (value.is_array()) {
@@ -353,7 +353,7 @@ static void hoist_defs_to_root(json & schema) {
         if (!schema.contains("$defs")) {
             schema["$defs"] = json::object();
         }
-        for (auto & [key, value] : collected_defs.items()) {
+        for (const auto & [key, value] : collected_defs.items()) {
             if (!schema["$defs"].contains(key)) {
                 schema["$defs"][key] = value;
             }

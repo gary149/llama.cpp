@@ -6,8 +6,17 @@
 #include "../http-inference-backend.h"
 #endif
 
+#include "common.h"
+#include "chat.h"
+#include "json.h"
+#include "log.h"
+
+// The server headers alias `json` to common_json and the agent headers alias it to nlohmann::ordered_json.
+// Rename the token only while the server headers are parsed so both can share this translation unit.
+#define json common_json
 #include "server-context.h"
 #include "server-http.h"
+#undef json
 
 #include "arg.h"
 #include "common.h"
@@ -114,8 +123,8 @@ int main(int argc, char ** argv) {
         params.kv_unified = true;
     }
 
-    if (params.model_alias.empty() && !params.model.name.empty()) {
-        params.model_alias.insert(params.model.name);
+    if (params.model_alias.empty() && !params.model.get_name().empty()) {
+        params.model_alias.insert(params.model.get_name());
     }
 
     common_init();
@@ -165,8 +174,8 @@ int main(int argc, char ** argv) {
         http_cfg.base_url = server_url;
         if (!params.model_alias.empty()) {
             http_cfg.model = *params.model_alias.begin();
-        } else if (!params.model.name.empty()) {
-            http_cfg.model = params.model.name;
+        } else if (!params.model.get_name().empty()) {
+            http_cfg.model = params.model.get_name();
         }
         http_backend = std::make_unique<http_inference_backend>(std::move(http_cfg));
         inference = http_backend.get();
