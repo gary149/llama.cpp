@@ -28,6 +28,7 @@ jobs:
             -DCMAKE_INSTALL_RPATH='@loader_path' \
             -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
             -DLLAMA_FATAL_WARNINGS=OFF \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=13.3 \
             -DGGML_METAL_USE_BF16=ON \
             -DGGML_METAL_EMBED_LIBRARY=ON \
             -DLLAMA_BUILD_BORINGSSL=ON \
@@ -125,6 +126,7 @@ jobs:
             -DGGML_BACKEND_DL=ON ^
             -DGGML_CPU_ALL_VARIANTS=ON ^
             -DGGML_OPENMP=ON ^
+            -DGGML_OPENMP_FETCH=ON ^
             -DLLAMA_BUILD_EXAMPLES=OFF ^
             -DLLAMA_BUILD_TESTS=ON ^
             -DLLAMA_BUILD_TOOLS=ON ^
@@ -142,7 +144,6 @@ jobs:
 
       - name: Pack
         run: |
-          Copy-Item "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC\14.44.35112\debug_nonredist\x64\Microsoft.VC143.OpenMP.LLVM\libomp140.x86_64.dll" .\build\bin\Release\
           7z a llama-agent-bin-win-x64.zip .\build\bin\Release\*
 
       - uses: actions/upload-artifact@v4
