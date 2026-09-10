@@ -38,6 +38,16 @@ with tempfile.TemporaryDirectory(prefix="agent-live-") as workspace:
         terminal.wait(lambda: "42" in terminal.text(), "live model answer", timeout=120)
         terminal.set_size(100, 32)
         terminal.wait(lambda: "tok/s" in terminal.text(), "live footer after resize")
+        terminal.wait(lambda: terminal.screen.display[-1].startswith("  "), "answer completed before menu")
+        before_menu = terminal.screen.display[:-3]
+        for cycle in range(2):
+            terminal.send("/")
+            terminal.wait(lambda: "/compact" in terminal.text(), f"live menu opened {cycle}")
+            terminal.send("\x1b")
+            terminal.wait(lambda: "/compact" not in terminal.text(), f"live menu closed {cycle}")
+            assert terminal.screen.display[:-3] == before_menu, "closing the live menu changed transcript spacing"
+            terminal.send("\x7f")
+            terminal.wait(lambda: terminal.screen.display[-3].strip() == "\u203a", "live menu draft cleared")
         terminal.send("Use the write tool to create smoke.txt containing exactly LIVE_TOOL_OK. Then answer DONE.\r")
         terminal.wait(lambda: "Permission:" in terminal.text(), "live write permission", timeout=120)
         if "Permission: write" not in terminal.text():
@@ -63,7 +73,7 @@ with tempfile.TemporaryDirectory(prefix="agent-live-") as workspace:
         start = len(terminal.raw)
         terminal.send("\x03")
         terminal.wait(lambda: b"[Cancelled by user]" in terminal.raw[start:], "live cancellation", timeout=30)
-        print("PASS: session resume, model answer, resize, permission, write tool, and cancellation")
+        print("PASS: session resume, model answer, resize, menu spacing, permission, write tool, and cancellation")
     finally:
         try:
             terminal.close()

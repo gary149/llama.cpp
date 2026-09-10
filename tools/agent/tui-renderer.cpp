@@ -1180,6 +1180,11 @@ void tui_renderer::flush_pending_transcript() {
         return;
     }
 
+    int row = 0;
+    int column = 0;
+    if (managed_visible_ && previous_region_.size() != current_region_lines(row, column).size()) {
+        repaint_screen();
+    }
     if (managed_visible_ && !previous_region_.empty()) {
         // Keep editor and footer cells out of scrollback.
         int height = static_cast<int>(previous_region_.size());
@@ -1224,6 +1229,7 @@ void tui_renderer::repaint_screen() {
     int column = 0;
     int available = std::max(0, term_rows_ - static_cast<int>(current_region_lines(row, column).size()));
     size_t first = visible.size() > static_cast<size_t>(available) ? visible.size() - available : 0;
+    fprintf(out_, "\x1b[%d;1H", available - static_cast<int>(visible.size() - first) + 1);
     for (size_t i = first; i < visible.size(); ++i) {
         fwrite(visible[i].data(), 1, visible[i].size(), out_);
         fputs("\x1b[0m\r\n", out_);
@@ -1242,6 +1248,9 @@ void tui_renderer::redraw_managed_region(bool full_redraw) {
     int height = static_cast<int>(region.size());
     int top = std::max(1, term_rows_ - height + 1);
 
+    if (managed_visible_ && previous_region_.size() != region.size()) {
+        repaint_screen();
+    }
     bool redraw_all = !managed_visible_ || full_redraw || force_full_redraw_ || previous_region_.size() != region.size();
     if (!managed_visible_) {
         // Reserve space below the transcript.
@@ -1251,13 +1260,6 @@ void tui_renderer::redraw_managed_region(bool full_redraw) {
     } else if (redraw_all) {
         int prev_top = std::max(1, std::min(last_drawn_top_, term_rows_));
         fprintf(out_, "\x1b[%d;1H\x1b[0J", prev_top);
-        if (top < prev_top) {
-            // Scroll the transcript before growing the managed region.
-            fprintf(out_, "\x1b[%d;1H", term_rows_);
-            for (int i = top; i < prev_top; ++i) {
-                fputs("\n", out_);
-            }
-        }
     }
     for (int i = 0; i < height; ++i) {
         if (redraw_all || region[i] != previous_region_[i]) {

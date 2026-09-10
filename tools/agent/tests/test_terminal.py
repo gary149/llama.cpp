@@ -326,12 +326,71 @@ class RendererTests(unittest.TestCase):
         t = self.terminal
         t.event("transcript", text="LAST TRANSCRIPT LINE\n")
         t.wait(lambda: "LAST TRANSCRIPT LINE" in t.text(), "transcript")
+        before = t.screen.display[:-3]
         t.send("/")
         t.wait(lambda: "/compact" in t.text(), "slash overlay")
         self.assertIn("LAST TRANSCRIPT LINE", t.text())
         t.send("\x1b")
         t.wait(lambda: "/compact" not in t.text(), "overlay dismissal")
         self.assertIn("LAST TRANSCRIPT LINE", t.text())
+        self.assertEqual(t.screen.display[:-3], before, "closing the menu must restore transcript spacing")
+
+    def test_menu_cycles_preserve_screen_and_scrollback(self):
+        t = self.terminal
+        t.event("transcript", text="".join(f"history-{i:04d}\n" for i in range(100)))
+        t.wait(lambda: "history-0099" in t.text(), "history before menu cycles")
+        before = t.screen.display[:-3]
+        history_rows = len(t.screen.history.top)
+        for cycle in range(3):
+            t.send("/")
+            t.wait(lambda: "/compact" in t.text(), f"menu opened {cycle}")
+            self.assertEqual(len(t.screen.history.top), history_rows, "opening a menu must not add scrollback")
+            t.send("\x03")
+            t.wait(lambda: "/compact" not in t.text(), f"menu closed {cycle}")
+            self.assertEqual(t.screen.display[:-3], before)
+            self.assertEqual(len(t.screen.history.top), history_rows)
+
+    def test_menu_dismissal_paths_restore_spacing(self):
+        t = self.terminal
+        t.event("transcript", text="LAST TRANSCRIPT LINE\n")
+        t.wait(lambda: "LAST TRANSCRIPT LINE" in t.text(), "transcript before dismissal paths")
+        before = t.screen.display[:-3]
+        for name, keys in [("escape", "\x1b"), ("backspace", "\x7f"), ("no matches", "zzzz"), ("submit", "\r")]:
+            with self.subTest(name=name):
+                t.send("/")
+                t.wait(lambda: "/compact" in t.text(), name + " menu opened")
+                t.send(keys)
+                t.wait(lambda: "/compact" not in t.text(), name + " menu closed")
+                self.assertEqual(t.screen.display[:-3], before)
+                if name == "submit":
+                    self.assertTrue(t.command()["received"])
+                if name in ("escape", "no matches"):
+                    t.send("\x03")
+                    t.wait(lambda: t.screen.display[-3].strip() == "\u203a", name + " draft cleared")
+
+    def test_menu_resize_restores_spacing(self):
+        t = self.terminal
+        t.event("transcript", text="LAST TRANSCRIPT LINE\n")
+        t.wait(lambda: "LAST TRANSCRIPT LINE" in t.text(), "transcript before menu resize")
+        before = t.screen.display[:-3]
+        t.send("/")
+        t.wait(lambda: "/compact" in t.text(), "menu before resize")
+        t.set_size(40, 10)
+        t.set_size(80, 24)
+        t.send("\x1b")
+        t.wait(lambda: "/compact" not in t.text(), "resized menu closed")
+        self.assertEqual(t.screen.display[:-3], before)
+
+    def test_permission_close_commits_without_gap(self):
+        t = self.terminal
+        t.event("transcript", text="LAST TRANSCRIPT LINE\n")
+        t.wait(lambda: "LAST TRANSCRIPT LINE" in t.text(), "transcript before permission")
+        t.event("permission")
+        t.wait(lambda: "Permission: write" in t.text(), "permission opened")
+        t.send("y")
+        t.wait(lambda: "[Permission granted for write]" in t.text(), "permission closed with transcript")
+        self.assertEqual(t.screen.display[-4].strip(), "[Permission granted for write]")
+        self.assertEqual(t.screen.display[-5].strip(), "LAST TRANSCRIPT LINE")
 
     def test_file_completion(self):
         directory = tempfile.TemporaryDirectory(prefix="agent-completion-")
