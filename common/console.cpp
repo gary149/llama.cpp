@@ -8,6 +8,7 @@
 #include <cwctype>
 #include <cstdint>
 #include <condition_variable>
+#include <atomic>
 #include <mutex>
 #include <thread>
 #include <stdarg.h>
@@ -72,6 +73,7 @@ namespace console {
     static bool         advanced_display = false;
     static bool         simple_io        = true;
     static display_type current_display  = DISPLAY_TYPE_RESET;
+    static std::atomic<bool> tui_active  = false;
 
     static FILE*        out              = stdout;
 
@@ -99,9 +101,28 @@ namespace console {
     }
 
     std::vector<std::pair<std::vector<uint8_t>, std::string>> take_pending_images() {
+        std::lock_guard<std::mutex> lock(g_console_mutex);
         std::vector<std::pair<std::vector<uint8_t>, std::string>> result;
         result.swap(pending_images_);
         return result;
+    }
+
+    bool try_paste_image_marker(std::string & marker) {
+        std::lock_guard<std::mutex> lock(g_console_mutex);
+        if (!paste_image_cb) {
+            return false;
+        }
+
+        std::vector<uint8_t> bytes;
+        std::string mime;
+        if (!paste_image_cb(bytes, mime)) {
+            return false;
+        }
+
+        pending_images_.push_back({std::move(bytes), std::move(mime)});
+        marker = pending_images_.size() == 1
+            ? "[image]" : "[image " + std::to_string(pending_images_.size()) + "]";
+        return true;
     }
 
     //
@@ -196,6 +217,18 @@ namespace console {
             tcsetattr(STDIN_FILENO, TCSANOW, &initial_state);
         }
 #endif
+    }
+
+    FILE * output_file() {
+        return out;
+    }
+
+    void set_tui_active(bool active) {
+        tui_active.store(active);
+    }
+
+    bool is_tui_active() {
+        return tui_active.load();
     }
 
     //
@@ -1300,6 +1333,18 @@ namespace console {
         completion_cb = cb;
     }
 
+    std::vector<std::pair<std::string, size_t>> complete(std::string_view line, size_t cursor_byte_pos) {
+        completion_callback cb;
+        {
+            std::lock_guard<std::mutex> lock(g_console_mutex);
+            cb = completion_cb;
+        }
+        if (!cb) {
+            return {};
+        }
+        return cb(line, cursor_byte_pos);
+    }
+
     namespace spinner {
         static const char LOADING_CHARS[] = {'|', '/', '-', '\\'};
         static std::condition_variable cv_stop;
@@ -1311,15 +1356,18 @@ namespace console {
         static void draw_next_frame() {
             // don't need lock because only one thread modifies running
             frame = (frame + 1) % sizeof(LOADING_CHARS);
+            std::lock_guard<std::mutex> console_lock(g_console_mutex);
             replace_last(LOADING_CHARS[frame]);
             fflush(out);
         }
         void start() {
             std::unique_lock<std::mutex> lock(mtx);
-            if (simple_io || running) {
+            assert(!tui_active.load());
+            if (simple_io || tui_active.load() || running) {
                 return;
             }
             common_log_flush(common_log_main());
+            std::lock_guard<std::mutex> console_lock(g_console_mutex);
             fprintf(out, "%c", LOADING_CHARS[0]);
             fflush(out);
             frame = 1;
@@ -1346,6 +1394,7 @@ namespace console {
             if (th.joinable()) {
                 th.join();
             }
+            std::lock_guard<std::mutex> console_lock(g_console_mutex);
             replace_last(' ');
             pop_cursor();
             fflush(out);

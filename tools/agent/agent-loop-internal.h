@@ -22,6 +22,7 @@ struct tool_stream_state {
     size_t content_scan_pos = 0;   // byte offset in accumulated_args where content value starts (0 = not found)
     std::string content_buffer;    // decoded content accumulated so far (avoids re-decoding from start)
     size_t content_raw_end = 0;    // how many bytes of accumulated_args have been decoded into content_buffer
+    bool started = false;
     bool content_complete = false; // true once the closing quote of the content field was found
 };
 

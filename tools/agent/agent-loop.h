@@ -69,6 +69,7 @@ struct session_stats {
 enum class agent_event_type {
     TEXT_DELTA,           // Streaming LLM token output
     REASONING_DELTA,      // Streaming reasoning/thinking content
+    TOOL_CALL_DELTA,      // Streaming tool-call argument output
     TOOL_START,           // Tool execution starting
     TOOL_RESULT,          // Tool execution completed
     PERMISSION_REQUIRED,  // Permission required - waiting for response
@@ -97,6 +98,14 @@ struct agent_event {
         return {agent_event_type::TOOL_START, {{"name", name}, {"args", args}}};
     }
 
+    static agent_event tool_call_delta(size_t index, const std::string & name, const std::string & args_delta) {
+        return {agent_event_type::TOOL_CALL_DELTA, {
+            {"index", index},
+            {"name", name},
+            {"args_delta", args_delta}
+        }};
+    }
+
     static agent_event tool_result(const std::string & name, bool success,
                                     const std::string & output, int64_t duration_ms) {
         return {agent_event_type::TOOL_RESULT, {
@@ -109,11 +118,13 @@ struct agent_event {
 
     static agent_event permission_required(const std::string & request_id,
                                             const std::string & tool_name,
+                                            const std::string & description,
                                             const std::string & details,
                                             bool is_dangerous) {
         return {agent_event_type::PERMISSION_REQUIRED, {
             {"request_id", request_id},
             {"tool", tool_name},
+            {"description", description},
             {"details", details},
             {"dangerous", is_dangerous}
         }};
@@ -133,7 +144,7 @@ struct agent_event {
         }};
     }
 
-    static agent_event completed(agent_stop_reason reason, const session_stats & stats) {
+    static agent_event completed(agent_stop_reason reason, const session_stats & stats, int32_t last_prompt_tokens = 0) {
         std::string reason_str;
         switch (reason) {
             case agent_stop_reason::COMPLETED:      reason_str = "completed"; break;
@@ -146,7 +157,9 @@ struct agent_event {
             {"stats", {
                 {"input_tokens", stats.total_input},
                 {"output_tokens", stats.total_output},
-                {"cached_tokens", stats.total_cached}
+                {"cached_tokens", stats.total_cached},
+                {"total_predicted_ms", stats.total_predicted_ms},
+                {"last_prompt_tokens", last_prompt_tokens}
             }}
         }};
     }

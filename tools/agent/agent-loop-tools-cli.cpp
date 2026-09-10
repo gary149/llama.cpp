@@ -4,6 +4,14 @@
 
 #include <chrono>
 #include <filesystem>
+#include <utility>
+
+static tool_result tool_error(std::string message) {
+    tool_result result;
+    result.success = false;
+    result.error = std::move(message);
+    return result;
+}
 
 tool_result agent_loop::execute_tool_call(const common_chat_tool_call & call) {
     auto & registry = tool_registry::instance();
@@ -11,7 +19,7 @@ tool_result agent_loop::execute_tool_call(const common_chat_tool_call & call) {
     // Check if tool exists
     const tool_def * tool = registry.get_tool(call.name);
     if (!tool) {
-        return {false, "", "Unknown tool: " + call.name};
+        return tool_error("Unknown tool: " + call.name);
     }
 
     // Parse arguments
@@ -19,7 +27,7 @@ tool_result agent_loop::execute_tool_call(const common_chat_tool_call & call) {
     try {
         args = json::parse(call.arguments);
     } catch (const json::parse_error & e) {
-        return {false, "", std::string("Invalid JSON arguments: ") + e.what()};
+        return tool_error(std::string("Invalid JSON arguments: ") + e.what());
     }
 
     // Determine permission type
@@ -55,7 +63,7 @@ tool_result agent_loop::execute_tool_call(const common_chat_tool_call & call) {
                 auto response = permission_mgr_.prompt_user(ext_req);
                 if (response == permission_response::DENY_ONCE ||
                     response == permission_response::DENY_ALWAYS) {
-                    return {false, "", "Blocked: File is outside working directory"};
+                    return tool_error("Blocked: File is outside working directory");
                 }
             }
         }
@@ -76,21 +84,21 @@ tool_result agent_loop::execute_tool_call(const common_chat_tool_call & call) {
         auto response = permission_mgr_.prompt_user(req);
         if (response == permission_response::DENY_ONCE ||
             response == permission_response::DENY_ALWAYS) {
-            return {false, "", "Blocked: Detected repeated identical tool calls"};
+            return tool_error("Blocked: Detected repeated identical tool calls");
         }
     }
 
     // Check permission
     permission_state state = permission_mgr_.check_permission(req);
     if (state == permission_state::DENY || state == permission_state::DENY_SESSION) {
-        return {false, "", "Permission denied for " + call.name};
+        return tool_error("Permission denied for " + call.name);
     }
 
     if (state == permission_state::ASK) {
         auto response = permission_mgr_.prompt_user(req);
         if (response == permission_response::DENY_ONCE ||
             response == permission_response::DENY_ALWAYS) {
-            return {false, "", "User denied permission for " + call.name};
+            return tool_error("User denied permission for " + call.name);
         }
     }
 

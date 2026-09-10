@@ -63,7 +63,8 @@ tool_result agent_loop::execute_tool_call_async(
 
                 // Request permission asynchronously
                 std::string req_id = async_perms.request_permission(ext_req);
-                on_event(agent_event::permission_required(req_id, call.name, ext_req.details, true));
+                on_event(agent_event::permission_required(
+                    req_id, call.name, ext_req.description, ext_req.details, true));
 
                 // Wait for response (cancellable via should_stop)
                 auto response = async_perms.wait_for_response_or_stop(req_id, 300000, should_stop);
@@ -94,7 +95,7 @@ tool_result agent_loop::execute_tool_call_async(
         req.description = "Detected repeated identical tool calls (doom loop)";
 
         std::string req_id = async_perms.request_permission(req);
-        on_event(agent_event::permission_required(req_id, call.name, req.details, true));
+        on_event(agent_event::permission_required(req_id, call.name, req.description, req.details, true));
 
         auto response = async_perms.wait_for_response_or_stop(req_id, 300000, should_stop);
         if (should_stop()) {
@@ -117,7 +118,8 @@ tool_result agent_loop::execute_tool_call_async(
     if (state == permission_state::ASK) {
         // Request permission asynchronously
         std::string req_id = async_perms.request_permission(req);
-        on_event(agent_event::permission_required(req_id, call.name, req.details, req.is_dangerous));
+        on_event(agent_event::permission_required(
+            req_id, call.name, req.description, req.details, req.is_dangerous));
 
         // Wait for response (cancellable via should_stop)
         auto response = async_perms.wait_for_response_or_stop(req_id, 300000, should_stop);

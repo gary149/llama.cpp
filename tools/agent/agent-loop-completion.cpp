@@ -30,6 +30,13 @@ inference_result agent_loop::generate_completion_streaming(
                     }
                     break;
                 case inference_event_type::TOOL_CALL_DELTA:
+                    if (event.diff.tool_call_index != std::string::npos) {
+                        on_event(agent_event::tool_call_delta(
+                            event.diff.tool_call_index,
+                            event.diff.tool_call_delta.name,
+                            event.diff.tool_call_delta.arguments));
+                    }
+                    break;
                 case inference_event_type::PROMPT_PROGRESS:
                     break;
             }
