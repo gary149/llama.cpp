@@ -135,8 +135,12 @@ private:
     std::string completion_prefix_;
     std::string last_file_query_;
     uint64_t file_completion_generation_ = 0;
+    struct completion_worker {
+        std::thread thread;
+        std::shared_ptr<std::atomic<bool>> done;
+    };
     std::mutex autocomplete_threads_mu_;
-    std::vector<std::thread> autocomplete_threads_;
+    std::vector<completion_worker> autocomplete_workers_;
 
     permission_request active_permission_;
     std::string active_permission_id_;

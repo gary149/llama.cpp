@@ -4,9 +4,11 @@
 #include "tui-select-list.h"
 #include "console.h"
 
+#include <cerrno>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <clocale>
-#include <fstream>
 #include <iostream>
 #include <thread>
 
@@ -17,7 +19,39 @@
 #endif
 #include <windows.h>
 #undef ERROR
+#else
+#include <langinfo.h>
 #endif
+
+// Width checks need a UTF-8 locale; fall back to one when the environment provides none
+static void set_utf8_locale() {
+    std::setlocale(LC_ALL, "");
+#if !defined(_WIN32)
+    const char * codeset = nl_langinfo(CODESET);
+    if (codeset && std::strcmp(codeset, "UTF-8") != 0 && !std::setlocale(LC_ALL, "C.UTF-8")) {
+        std::setlocale(LC_ALL, "en_US.UTF-8");
+    }
+#endif
+}
+
+// std::getline on libc++ fills the whole stream buffer before returning, which blocks on a pipe
+static bool read_control_line(FILE * control, std::string & line) {
+    line.clear();
+    while (true) {
+        int ch = std::fgetc(control);
+        if (ch == EOF) {
+            if (std::ferror(control) && errno == EINTR) {
+                std::clearerr(control);
+                continue;
+            }
+            return !line.empty();
+        }
+        if (ch == '\n') {
+            return true;
+        }
+        line.push_back(static_cast<char>(ch));
+    }
+}
 
 static void require(bool ok, const char * message) {
     if (!ok) {
@@ -157,9 +191,8 @@ static void test_footer_and_agent_event_projection() {
 }
 
 static int terminal_fixture(const char * control_path) {
-    std::setlocale(LC_ALL, "");
-    std::ifstream control(control_path);
-    require(control.good(), "cannot open fixture control pipe");
+    FILE * control = std::fopen(control_path, "r");
+    require(control != nullptr, "cannot open fixture control pipe");
     tui_renderer::config cfg;
     cfg.color = std::getenv("LLAMA_TEST_COLOR") != nullptr;
     const char * working_dir = std::getenv("LLAMA_TEST_CWD");
@@ -179,7 +212,7 @@ static int terminal_fixture(const char * control_path) {
     tui_renderer renderer(cfg);
     std::string permission_id;
     std::string line;
-    while (std::getline(control, line)) {
+    while (read_control_line(control, line)) {
         auto request = nlohmann::json::parse(line);
         std::string op = request.at("op");
         if (op == "quit") {
@@ -241,6 +274,7 @@ static int terminal_fixture(const char * control_path) {
         }
     }
     renderer.shutdown();
+    std::fclose(control);
     return 0;
 }
 
@@ -332,7 +366,7 @@ static void test_native_console() {
 #endif
 
 int main(int argc, char ** argv) {
-    std::setlocale(LC_ALL, "");
+    set_utf8_locale();
     if (argc == 3 && std::string(argv[1]) == "--terminal-fixture") {
         return terminal_fixture(argv[2]);
     }

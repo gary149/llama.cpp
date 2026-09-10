@@ -260,6 +260,8 @@ tui_event tui_event_from_agent_event(const agent_event & event) {
             out.tool_name = event.data.value("name", "");
             out.tool_success = event.data.value("success", true);
             out.tool_output = event.data.value("output", "");
+            out.tool_error = event.data.value("error", "");
+            out.tool_no_truncate = event.data.value("no_truncate", false);
             out.elapsed_ms = event.data.value("duration_ms", 0);
             break;
         case agent_event_type::PERMISSION_REQUIRED:
@@ -395,12 +397,12 @@ void tui_renderer::shutdown() {
     }
     {
         std::lock_guard<std::mutex> lock(autocomplete_threads_mu_);
-        for (auto & th : autocomplete_threads_) {
-            if (th.joinable()) {
-                th.join();
+        for (auto & worker : autocomplete_workers_) {
+            if (worker.thread.joinable()) {
+                worker.thread.join();
             }
         }
-        autocomplete_threads_.clear();
+        autocomplete_workers_.clear();
     }
     restore_raw_mode();
     restore_resize_handler();
@@ -462,7 +464,8 @@ void tui_renderer::install_resize_handler() {
     struct sigaction act;
     act.sa_handler = tui_sigwinch_handler;
     sigemptyset(&act.sa_mask);
-    act.sa_flags = 0;
+    // Restart interrupted syscalls so a resize does not fail a blocking read on other threads
+    act.sa_flags = SA_RESTART;
     if (sigaction(SIGWINCH, &act, &previous_sigwinch_) == 0) {
         sigwinch_installed_ = true;
     }
@@ -778,12 +781,15 @@ void tui_renderer::render_tool_start(const tui_event & event) {
 }
 
 void tui_renderer::render_tool_result(const tui_event & event) {
-    std::string display = truncate_display(event.tool_output, 500);
+    std::string display = event.tool_no_truncate ? event.tool_output : truncate_display(event.tool_output, 500);
     if (!display.empty()) {
         if (display.back() != '\n') {
             display.push_back('\n');
         }
         append_transcript_line(display, event.tool_success ? tui_transcript_style::NORMAL : tui_transcript_style::FAILURE);
+    }
+    if (!event.tool_error.empty()) {
+        append_transcript_line("Error: " + event.tool_error + "\n", tui_transcript_style::FAILURE);
     }
     std::ostringstream ss;
     if (event.elapsed_ms < 1000) {
@@ -1047,7 +1053,8 @@ void tui_renderer::start_file_completion_worker(const std::string & query, uint6
     tui_event refresh;
     refresh.type = tui_event_type::AUTOCOMPLETE_RESULTS;
     events_.push(std::move(refresh));
-    std::thread worker([this, cwd, query, generation]() {
+    auto done = std::make_shared<std::atomic<bool>>(false);
+    std::thread worker([this, cwd, query, generation, done]() {
         std::vector<std::string> items;
         try {
             fs::path root(cwd);
@@ -1098,9 +1105,19 @@ void tui_renderer::start_file_completion_worker(const std::string & query, uint6
         ev.autocomplete_generation = generation;
         ev.autocomplete_query = query;
         events_.push(std::move(ev));
+        done->store(true);
     });
     std::lock_guard<std::mutex> lock(autocomplete_threads_mu_);
-    autocomplete_threads_.push_back(std::move(worker));
+    // Reap finished workers so a long session does not accumulate joinable threads
+    for (auto it = autocomplete_workers_.begin(); it != autocomplete_workers_.end();) {
+        if (it->done->load()) {
+            it->thread.join();
+            it = autocomplete_workers_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    autocomplete_workers_.push_back({std::move(worker), done});
 }
 
 void tui_renderer::open_permission_overlay(const tui_event & event) {

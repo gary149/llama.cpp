@@ -461,7 +461,8 @@ agent_loop_result agent_loop::run_streaming(
             auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
 
             // Emit tool result event
-            on_event(agent_event::tool_result(call.name, tool_res.success, tool_res.output, elapsed_ms));
+            on_event(agent_event::tool_result(call.name, tool_res.success, tool_res.output, elapsed_ms,
+                                              tool_res.error, tool_res.no_truncate_display));
 
             std::string call_id = call.id.empty() ? ("call_" + std::to_string(result.iterations)) : call.id;
             add_tool_result_message(call.name, call_id, tool_res);

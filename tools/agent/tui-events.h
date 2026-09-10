@@ -49,7 +49,9 @@ struct tui_event {
     std::string tool_name;
     std::string tool_args;
     std::string tool_output;
+    std::string tool_error;
     bool        tool_success = true;
+    bool        tool_no_truncate = false;
     size_t      tool_call_index = std::string::npos;
     int64_t     elapsed_ms = 0;
 

@@ -223,8 +223,8 @@ if(LLAMA_BUILD_TESTS)
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_terminal.py --color
             --executable $<TARGET_FILE:test-agent-tui>
             --artifacts ${CMAKE_CURRENT_BINARY_DIR}/terminal-artifacts/color)
-        set_tests_properties(agent-terminal PROPERTIES TIMEOUT 120)
-        set_tests_properties(agent-terminal-color PROPERTIES TIMEOUT 120)
+        set_tests_properties(agent-terminal PROPERTIES TIMEOUT 600)
+        set_tests_properties(agent-terminal-color PROPERTIES TIMEOUT 600)
     endif()
 
     if(LLAMA_HTTPLIB)

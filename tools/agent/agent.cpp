@@ -526,6 +526,7 @@ const char * LLAMA_AGENT_LOGO = R"(
 )";
 
 static std::atomic<bool> g_is_interrupted = false;
+static std::atomic<bool> g_terminate_requested = false;
 
 // Points at main()'s automatic-storage spawned_llama_server (if any) so the
 // double-Ctrl-C path can reap the child before std::exit() skips destructors.
@@ -556,7 +557,7 @@ static std::string read_stdin_prompt() {
 }
 
 #if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__)) || defined (_WIN32)
-static void signal_handler(int) {
+static void signal_handler(int sig) {
     if (g_is_interrupted.load()) {
         // std::exit() skips automatic-storage destructors, so reap the spawned
         // llama-server here. kill()/waitpid() in stop() are async-signal-safe.
@@ -568,6 +569,9 @@ static void signal_handler(int) {
         std::exit(130);
     }
     g_is_interrupted.store(true);
+    if (sig == SIGTERM) {
+        g_terminate_requested.store(true);
+    }
 }
 #endif
 
@@ -1002,7 +1006,6 @@ int main(int argc, char ** argv) {
     if (!params.prompt.empty()) {
         initial_prompt = params.prompt;
         params.prompt.clear();  // Only use once
-        params.single_turn = true;
     } else if (!is_stdin_terminal()) {
         initial_prompt = read_stdin_prompt();
         // Trim trailing whitespace
@@ -1148,17 +1151,16 @@ int main(int argc, char ** argv) {
         } else {
             if (tui) {
                 tui_command command;
-                if (!tui->wait_for_command(command)) {
-                    break;
+                bool received = false;
+                while (!received && !g_terminate_requested.load()) {
+                    received = tui->wait_for_command(command, 200);
                 }
-                if (command.eof) {
+                if (!received || command.eof) {
                     break;
                 }
                 buffer = std::move(command.text);
                 pasted_images = std::move(command.images);
-                // Echo the user's submitted line into the transcript. Without this the
-                // managed input region clears on submit and nothing records what was
-                // typed, so the conversation view shows only assistant output.
+                // The input region clears on submit, so echo the submission into the transcript
                 if (!buffer.empty()) {
                     tui->post_transcript("\n\xE2\x80\xBA " + buffer + "\n",
                                          tui_transcript_style::USER_INPUT);
@@ -1232,18 +1234,32 @@ int main(int argc, char ** argv) {
                     console::set_display(DISPLAY_TYPE_RESET);
                 }
                 g_is_interrupted.store(false);
-                auto cmd_result = run_user_command(cmd, working_dir, g_is_interrupted,
-                    tui ? [&](std::string_view chunk) {
-                        tui->post_transcript(std::string(chunk), tui_transcript_style::NORMAL);
-                    } : std::function<void(std::string_view)>());
+                std::string shell_pending;
+                std::function<void(std::string_view)> on_output;
+                if (tui) {
+                    // Post whole lines only: a pipe read can split a line, a UTF-8 sequence, or an escape code
+                    on_output = [&](std::string_view chunk) {
+                        shell_pending.append(chunk.data(), chunk.size());
+                        size_t last_nl = shell_pending.rfind('\n');
+                        if (last_nl != std::string::npos) {
+                            tui->post_transcript(shell_pending.substr(0, last_nl + 1));
+                            shell_pending.erase(0, last_nl + 1);
+                        }
+                    };
+                    // The generating state routes ESC/Ctrl+C to the interrupt flag that stops the command
+                    tui->set_generating(true);
+                }
+                auto cmd_result = run_user_command(cmd, working_dir, g_is_interrupted, on_output);
+                if (tui) {
+                    tui->set_generating(false);
+                    if (!shell_pending.empty()) {
+                        tui->post_transcript(shell_pending + "\n");
+                    }
+                }
 
                 // Ensure output ends with newline for clean display
-                if (!cmd_result.output.empty() && cmd_result.output.back() != '\n') {
-                    if (tui) {
-                        tui->post_transcript("\n", tui_transcript_style::NORMAL);
-                    } else {
-                        fwrite("\n", 1, 1, stdout);
-                    }
+                if (!tui && !cmd_result.output.empty() && cmd_result.output.back() != '\n') {
+                    fwrite("\n", 1, 1, stdout);
                 }
 
                 if (cmd_result.exit_code != 0) {
@@ -1288,10 +1304,7 @@ int main(int argc, char ** argv) {
                 if (tui) {
                     tui_permissions.clear_session();
                     tui->post_stats(agent.get_stats(), 0);
-                    // Post a visible separator so old conversation history is clearly
-                    // distinguished from the freshly-cleared context. The renderer
-                    // shows this inline; a true screen-clear would require a renderer
-                    // hook not owned by this agent.
+                    // Separate the old transcript from the cleared context
                     tui->post_transcript(
                         "\n--- conversation cleared ---\n\n",
                         tui_transcript_style::INFO);
@@ -1301,7 +1314,18 @@ int main(int argc, char ** argv) {
             }
             if (command_buffer == "/compact") {
                 emit_tui_or_console("\nCompacting...\n", tui_transcript_style::INFO);
-                if (agent.compact()) {
+                g_is_interrupted.store(false);
+                if (tui) {
+                    tui->set_generating(true);
+                }
+                bool compacted = agent.compact();
+                if (tui) {
+                    tui->set_generating(false);
+                }
+                if (g_is_interrupted.load()) {
+                    emit_tui_or_console("[Compaction cancelled]\n");
+                    g_is_interrupted.store(false);
+                } else if (compacted) {
                     emit_tui_or_console("Context compacted.\n", tui_transcript_style::INFO);
                 } else {
                     emit_tui_or_console("Nothing to compact (conversation too short).\n");

@@ -89,6 +89,9 @@ class Terminal:
         return json.loads(self.process.stderr.readline())
 
     def close(self):
+        if getattr(self, "closed", False):
+            return
+        self.closed = True
         try:
             if self.process.poll() is None:
                 if self.fixture:
@@ -105,7 +108,11 @@ class Terminal:
             self.read(0)
             if self.process.returncode != 0:
                 raise AssertionError(self.process.stderr.read().decode())
-            if termios.tcgetattr(self.slave) != self.original_mode:
+            restored = termios.tcgetattr(self.slave)
+            # macOS sets the transient PENDIN state bit when canonical mode returns with typed-ahead input
+            for mode in (restored, self.original_mode):
+                mode[3] &= ~termios.PENDIN
+            if restored != self.original_mode:
                 raise AssertionError("terminal mode was not restored")
         finally:
             os.close(self.control)
@@ -502,4 +509,5 @@ if __name__ == "__main__":
     parser.add_argument("--artifacts", default="terminal-artifacts")
     parser.add_argument("--color", action="store_true")
     ARGS, remaining = parser.parse_known_args()
+    ARGS.executable = str(Path(ARGS.executable).resolve())
     unittest.main(argv=[__file__, *remaining])

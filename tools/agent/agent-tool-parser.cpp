@@ -24,12 +24,9 @@ static bool ends_with(const std::string & value, const std::string & suffix) {
            value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
 }
 
-// Scan forward from `pos` (which must point to a '{') and return the index one
-// past the matching closing '}', or std::string::npos if the braces are never
-// balanced. Handles nested objects and arrays, and skips over string literals
-// (including escaped characters) so interior braces inside strings are ignored.
-static size_t find_balanced_brace_end(const std::string & s, size_t pos) {
-    if (pos >= s.size() || s[pos] != '{') {
+// Return the index one past the bracket that closes the JSON object or array starting at `pos`, or npos if unbalanced
+static size_t find_balanced_json_end(const std::string & s, size_t pos) {
+    if (pos >= s.size() || (s[pos] != '{' && s[pos] != '[')) {
         return std::string::npos;
     }
     int depth = 0;
@@ -198,29 +195,23 @@ common_chat_msg agent_parse_tool_protocol_response(
             size_t end = visible_content.find(close_tag, body_start);
 
             if (end == std::string::npos) {
-                // No closing tag found. Try a balanced-brace fallback: locate the
-                // first '{' after the opening tag and scan to its matching '}'.
-                size_t brace_start = visible_content.find('{', body_start);
-                if (brace_start == std::string::npos) {
-                    // No JSON object at all after the opening tag; nothing to do.
+                // No closing tag: recover a complete JSON payload by bracket balancing
+                size_t json_start = visible_content.find_first_of("{[", body_start);
+                if (json_start == std::string::npos) {
                     break;
                 }
-                size_t brace_end = find_balanced_brace_end(visible_content, brace_start);
-                if (brace_end == std::string::npos) {
-                    // Braces are not yet balanced (incomplete stream); stop here.
+                size_t json_end = find_balanced_json_end(visible_content, json_start);
+                if (json_end == std::string::npos) {
                     break;
                 }
-                std::string body = trim_copy(visible_content.substr(brace_start, brace_end - brace_start));
+                std::string body = trim_copy(visible_content.substr(json_start, json_end - json_start));
                 try {
                     append_tool_calls_from_json(json::parse(body), allowed_tools, calls);
                 } catch (...) {
-                    // Malformed JSON even after balanced-brace extraction; leave as visible content.
                     search_from = body_start;
                     continue;
                 }
-                // Erase from the opening tag up to the end of the JSON object
-                // (ignore any trailing junk before the next tag or end of string).
-                visible_content.erase(start, brace_end - start);
+                visible_content.erase(start, json_end - start);
                 search_from = start;
                 continue;
             }

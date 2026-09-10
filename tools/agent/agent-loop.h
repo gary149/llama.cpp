@@ -107,11 +107,14 @@ struct agent_event {
     }
 
     static agent_event tool_result(const std::string & name, bool success,
-                                    const std::string & output, int64_t duration_ms) {
+                                    const std::string & output, int64_t duration_ms,
+                                    const std::string & error = "", bool no_truncate = false) {
         return {agent_event_type::TOOL_RESULT, {
             {"name", name},
             {"success", success},
             {"output", output},
+            {"error", error},
+            {"no_truncate", no_truncate},
             {"duration_ms", duration_ms}
         }};
     }
