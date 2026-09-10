@@ -1,5 +1,7 @@
 # Terminal rendering tests
 
+[Watch the Linux terminal test recording](media/README.md), including all scenarios in both color modes, the live Qwen smoke test, and test-suite results.
+
 The C++ fixture runs the production renderer and input loop in a pseudoterminal. A separate control pipe injects agent events and reads submitted commands. Python interprets the emitted ANSI bytes with pyte and checks screen contents, cursor positions, input preservation, and terminal mode restoration. No model is needed for these regression tests.
 
 ```sh
